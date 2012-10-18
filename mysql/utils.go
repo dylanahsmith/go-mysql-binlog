@@ -183,6 +183,13 @@ func byteToUint8(b byte) (n uint8) {
 	return
 }
 
+func uint16ToBytes(n uint16) (b []byte) {
+	b = make([]byte, 2)
+	b[0] = byte(n)
+	b[1] = byte(n >> 8)
+	return
+}
+
 func bytesToUint16(b []byte) (n uint16) {
 	n |= uint16(b[0])
 	n |= uint16(b[1]) << 8

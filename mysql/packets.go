@@ -299,6 +299,15 @@ func (mc *mysqlConn) writeCommandPacket(command commandType, args ...interface{}
 		}
 		arg = uint32ToBytes(args[0].(uint32))
 
+	case COM_BINLOG_DUMP:
+		if len(args) != 4 {
+			return fmt.Errorf("Invalid arguments count (Got: %d Has: 4)", len(args))
+		}
+		arg = uint32ToBytes(args[0].(uint32))
+		arg = append(arg, uint16ToBytes(args[1].(uint16))...)
+		arg = append(arg, uint32ToBytes(args[2].(uint32))...)
+		arg = append(arg, []byte(args[3].(string))...)
+
 	default:
 		return fmt.Errorf("Unknown command: %d", command)
 	}
