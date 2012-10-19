@@ -545,6 +545,11 @@ func (mc *mysqlConn) DumpBinlog(filename string, position uint32) (driver.Rows, 
 			if e != nil {
 				return nil, e
 			}
+
+			if event.Header().LogPos == 0 && event.Header().EventType != ROTATE_EVENT && event.Header().EventType != FORMAT_DESCRIPTION_EVENT {
+				panic("Failed to load a Binlog of version 4.")
+			}
+
 			event.Print()
 		} else {
 			fmt.Printf("Unknown packet:\n%s\n\n", hex.Dump(pkt))
