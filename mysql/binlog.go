@@ -560,3 +560,39 @@ func (mc *mysqlConn) DumpBinlog(filename string, position uint32) (driver.Rows, 
 	return nil, nil
 }
 
+func (mc *mysqlConn) BinlogEnumerator(pipe chan BinlogEvent, filename string, position uint32) {
+	parser := new(eventParser)
+	ServerId := uint32(1) // Must be non-zero to avoid getting EOF packet
+	flags := uint16(0)
+
+	e := mc.writeCommandPacket(COM_BINLOG_DUMP, position, flags, ServerId, filename)
+	if e != nil {
+		panic("Failed to start reading binlog")
+	}
+
+	for {
+		pkt, e := mc.readPacket()
+		if e != nil {
+			panic("Failed to read binlog packet")
+		} else if pkt[0] == 254 { // EOF packet
+			break
+		}
+		if pkt[0] == 0 {
+			event, e := parser.parseEvent(pkt[1:])
+			if e != nil {
+				panic("Failed to parse a binlog event")
+			}
+
+			if event.Header().LogPos == 0 && event.Header().EventType != ROTATE_EVENT && event.Header().EventType != FORMAT_DESCRIPTION_EVENT {
+				panic("Failed to load a Binlog of version 4.")
+			}
+
+			pipe <- event
+		} else {
+			fmt.Printf("Unknown packet:\n%s\n\n", hex.Dump(pkt))
+		}
+		fmt.Println()
+	}
+
+}
+
