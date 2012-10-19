@@ -592,7 +592,6 @@ func (mc *mysqlConn) BinlogEnumerator(pipe chan BinlogEvent, filename string, po
 		} else {
 			fmt.Printf("Unknown packet:\n%s\n\n", hex.Dump(pkt))
 		}
-		fmt.Println()
 	}
 
 }
