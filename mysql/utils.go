@@ -18,6 +18,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"encoding/binary"
+	"errors"
 )
 
 // Logger
@@ -174,6 +176,53 @@ func readAndDropLengthCodedBinary(data []byte) (n int, e error) {
 	return
 }
 
+
+func readLengthEncodedInt(buf *bytes.Buffer) (num uint64, isNull bool, e error) {
+	var b byte
+
+	b, e = buf.ReadByte()
+	if e != nil {
+		return
+	}
+
+	switch {
+
+	// 0-250: value of first byte
+	case b <= 250:
+		num = uint64(b)
+		return
+
+	// 251: NULL
+	case b == 251:
+		num = 0
+		isNull = true
+		return
+
+	// 252: value of following 2
+	case b == 252:
+		var num16 uint16
+		binary.Read(buf, binary.LittleEndian, &num16)
+		num = uint64(num16)
+		return
+
+	// 253: value of following 3
+	case b == 253:
+		num, e = readFixedLengthInteger(buf, 3)
+		return
+
+	// 254: value of following 8
+	case b == 254:
+		e = binary.Read(buf, binary.LittleEndian, &num)
+		return
+
+	default:
+		e = errors.New("undefined value (0xff) length encoded integer")
+		return
+	}
+
+	return
+}
+
 /******************************************************************************
 *                       Convert from and to bytes                             *
 ******************************************************************************/
@@ -200,6 +249,19 @@ func uint24ToBytes(n uint32) (b []byte) {
 	b = make([]byte, 3)
 	for i := uint8(0); i < 3; i++ {
 		b[i] = byte(n >> (i * 8))
+	}
+	return
+}
+
+func readFixedLengthInteger(buf *bytes.Buffer, size int) (num uint64, err error) {
+	var b byte
+	num = 0
+	if (buf.Len() < size) {
+		return 0, io.EOF
+	}
+	for i := uint(0); i < uint(size); i++ {
+		b, err = buf.ReadByte()
+		num |= uint64(b) << (i * 8)
 	}
 	return
 }
