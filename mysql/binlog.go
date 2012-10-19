@@ -7,6 +7,7 @@ import (
 
 	"fmt"
 	"time"
+	"encoding/hex"
 )
 
 type eventType byte
@@ -223,9 +224,9 @@ func (mc *mysqlConn) DumpBinlog(filename string, position uint32) (driver.Rows, 
 				return nil, e
 			}
 			header.Print()
-			fmt.Printf("Event Data: %x\n\n", pkt[20:])
+			fmt.Printf("Event Data:\n%s\n\n", hex.Dump(pkt[20:]))
 		} else {
-			fmt.Printf("Unknown packet: %x\n\n", pkt)
+			fmt.Printf("Unknown packet:\n%s\n\n", hex.Dump(pkt))
 		}
 	}
 
