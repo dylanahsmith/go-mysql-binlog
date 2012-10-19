@@ -17,28 +17,22 @@ func OpenDB() *sql.DB {
 
 type MysqlConnection interface {
 	DumpBinlog(filename string, position uint32) (driver.Rows, error)
+	BinlogFilename(db *sql.DB) (filename string, position uint32)
 }
 
 func main() {
 	db := OpenDB()
 	defer db.Close()
-
-	var filename, binlog_do_db, binlog_ignore_db string
-	var position uint32
-
-	row := db.QueryRow("SHOW MASTER STATUS")
-	err := row.Scan(&filename, &position, &binlog_do_db, &binlog_ignore_db)
-	if err != nil {
-		panic(err)
-	}
-	fmt.Printf("filename: %v, position: %v\n", filename, position)
-
+	
 	driver := db.Driver()
 	conn, err := driver.Open(dataSource)
 	if err != nil {
 		panic(err)
 	}
 	mysqlConn := conn.(MysqlConnection)
+
+	filename,position := mysqlConn.BinlogFilename(db)
+	fmt.Printf("filename: %v, position: %v\n", filename, position)
 
 	rows, err := mysqlConn.DumpBinlog(filename, position)
 	if err != nil {
