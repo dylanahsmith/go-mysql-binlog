@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"database/sql/driver"
+	"database/sql"
 	"encoding/binary"
 	"bytes"
 	"io"
@@ -593,6 +594,21 @@ func (mc *mysqlConn) BinlogEnumerator(pipe chan BinlogEvent, filename string, po
 		}
 		fmt.Println()
 	}
+
+}
+
+func (mc *mysqlConn) BinlogFilename(db *sql.DB) (string,uint32) {	
+	var filename, binlog_do_db, binlog_ignore_db string
+	var position uint32
+
+
+	row := db.QueryRow("SHOW MASTER STATUS")
+	err := row.Scan(&filename, &position, &binlog_do_db, &binlog_ignore_db)
+	if err != nil {
+		panic(err)
+	}
+
+	return filename, position
 
 }
 
