@@ -23,10 +23,10 @@ func (bits Bitfield) isSet(index uint) bool {
 }
 
 
-type eventType byte
+type EventType byte
 
 const (
-	UNKNOWN_EVENT eventType = iota
+	UNKNOWN_EVENT EventType = iota
 	START_EVENT_V3
 	QUERY_EVENT
 	STOP_EVENT
@@ -82,7 +82,7 @@ const (
 
 type EventHeader struct {
 	Timestamp uint32
-	EventType eventType
+	EventType EventType
 	ServerId uint32
 	EventSize uint32
 	LogPos uint32
@@ -375,7 +375,7 @@ type BinlogEvent interface {
 func (parser *eventParser) parseEvent(data []byte) (event BinlogEvent, err error) {
 	buf := bytes.NewBuffer(data)
 
-	switch(eventType(data[4])) {
+	switch(EventType(data[4])) {
 	case FORMAT_DESCRIPTION_EVENT:
 		parser.format, err = parseFormatDescriptionEvent(buf)
 		event = parser.format
