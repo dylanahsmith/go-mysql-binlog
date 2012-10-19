@@ -16,21 +16,13 @@ func OpenDB() *sql.DB {
 
 type MysqlConnection interface {
 	BinlogEnumerator(binlog_pipe chan mysql.BinlogEvent, filename string, position uint32)	
+	BinlogFilename(db *sql.DB) (filename string, position uint32)
 }
 
 func main() {
 	db := OpenDB()
 	defer db.Close()
 
-	var filename, binlog_do_db, binlog_ignore_db string
-	var position uint32
-
-	row := db.QueryRow("SHOW MASTER STATUS")
-	err := row.Scan(&filename, &position, &binlog_do_db, &binlog_ignore_db)
-	if err != nil {
-		panic(err)
-	}
-	fmt.Printf("filename: %v, position: %v\n", filename, position)
 
 	driver := db.Driver()
 	conn, err := driver.Open(dataSource)
@@ -38,9 +30,13 @@ func main() {
 		panic(err)
 	}
 	mysqlConn := conn.(MysqlConnection)
+	filename,position := mysqlConn.BinlogFilename(db)
+
+	fmt.Printf("filename: %v, position: %v\n", filename, position)
 
 
 	binlog_pipe := make(chan mysql.BinlogEvent)
+
 
 	go mysqlConn.BinlogEnumerator(binlog_pipe,filename,position)
 	for {
