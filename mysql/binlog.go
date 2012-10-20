@@ -208,12 +208,134 @@ func (event *FormatDescriptionEvent) Print() {
 type RowsEvent struct {
 	header EventHeader
 	tableId uint64
+	tableMap *TableMapEvent
 	flags uint16
 	columnsPresentBitmap1 Bitfield
 	columnsPresentBitmap2 Bitfield
-	nullBitmap Bitfield
-	row_data []byte
-	//fields []interface{}
+	rows []*[]driver.Value
+}
+
+func parseEventRow(buf *bytes.Buffer, tableMap *TableMapEvent) (row []driver.Value, e error) {
+	columnsCount := len(tableMap.columnTypes)
+
+	row = make([]driver.Value, columnsCount)
+
+	bitfieldSize := (columnsCount + 7) / 8
+	nullBitMap := Bitfield(buf.Next(bitfieldSize))
+
+	for i := 0; i < columnsCount; i++ {
+		if nullBitMap.isSet(uint(i)) {
+			row[i] = nil
+			continue
+		}
+
+		switch tableMap.columnTypes[i] {
+		case FIELD_TYPE_NULL:
+			row[i] = nil
+
+		case FIELD_TYPE_TINY:
+			var b byte
+			b, e = buf.ReadByte()
+			row[i] = int64(b)
+
+		case FIELD_TYPE_SHORT:
+			var short int16
+			e = binary.Read(buf, binary.LittleEndian, &short)
+			row[i] = int64(short)
+
+		case FIELD_TYPE_YEAR:
+			var b byte
+			b, e = buf.ReadByte()
+			if e == nil && b != 0 {
+				row[i] = time.Date(int(b) + 1900, time.January, 0, 0, 0, 0, 0, time.UTC)
+			}
+
+		case FIELD_TYPE_INT24:
+			row[i], e = readFixedLengthInteger(buf, 3)
+
+		case FIELD_TYPE_LONG:
+			var long int32
+			e = binary.Read(buf, binary.LittleEndian, &long)
+			row[i] = int64(long)
+
+		case FIELD_TYPE_LONGLONG:
+			var longlong int64
+			e = binary.Read(buf, binary.LittleEndian, &longlong)
+			row[i] = longlong
+
+		case FIELD_TYPE_FLOAT:
+			var float float32
+			e = binary.Read(buf, binary.LittleEndian, &float)
+			row[i] = float64(float)
+
+		case FIELD_TYPE_DOUBLE:
+			var double float64
+			e = binary.Read(buf, binary.LittleEndian, &double)
+			row[i] = double
+
+		case FIELD_TYPE_DECIMAL, FIELD_TYPE_NEWDECIMAL:
+			return nil, fmt.Errorf("parseEventRow unimplemented for field type %s", fieldTypeName(tableMap.columnTypes[i]))
+
+		case FIELD_TYPE_VARCHAR:
+			max_length := tableMap.columnMeta[i]
+			var length int
+			if max_length > 255 {
+				var short uint16
+				e = binary.Read(buf, binary.LittleEndian, &short)
+				length = int(short)
+			} else {
+				var b byte
+				b, e = buf.ReadByte()
+				length = int(b)
+			}
+			if buf.Len() < length {
+				e = io.EOF
+			}
+			row[i] = string(buf.Next(length))
+
+		case FIELD_TYPE_BLOB:
+			var length uint64
+			length, e = readFixedLengthInteger(buf, int(tableMap.columnMeta[i]))
+			row[i] = string(buf.Next(int(length)))
+
+		case FIELD_TYPE_BIT, FIELD_TYPE_ENUM,
+			FIELD_TYPE_SET, FIELD_TYPE_TINY_BLOB, FIELD_TYPE_MEDIUM_BLOB,
+			FIELD_TYPE_LONG_BLOB, FIELD_TYPE_VAR_STRING,
+			FIELD_TYPE_STRING, FIELD_TYPE_GEOMETRY:
+
+			return nil, fmt.Errorf("parseEventRow unimplemented for field type %s", fieldTypeName(tableMap.columnTypes[i]))
+
+		case FIELD_TYPE_DATE, FIELD_TYPE_NEWDATE:
+			return nil, fmt.Errorf("parseEventRow unimplemented for field type %s", fieldTypeName(tableMap.columnTypes[i]))
+
+		case FIELD_TYPE_TIME:
+			return nil, fmt.Errorf("parseEventRow unimplemented for field type %s", fieldTypeName(tableMap.columnTypes[i]))
+
+		case FIELD_TYPE_TIMESTAMP:
+			return nil, fmt.Errorf("parseEventRow unimplemented for field type %s", fieldTypeName(tableMap.columnTypes[i]))
+		case FIELD_TYPE_DATETIME:
+			var t int64
+			e = binary.Read(buf, binary.LittleEndian, &t)
+
+			second := int(t % 100)
+			minute := int((t % 10000) / 100)
+			hour := int((t % 1000000) / 10000)
+
+			d := int(t / 1000000)
+			day := d % 100
+			month := time.Month((d % 10000) / 100)
+			year := d / 10000
+
+			row[i] = time.Date(year, month, day, hour, minute, second, 0, time.UTC)
+
+		default:
+			return nil, fmt.Errorf("Unknown FieldType %d", tableMap.columnTypes[i])
+		}
+		if e != nil {
+			return nil, e
+		}
+	}
+	return
 }
 
 func (parser *eventParser) parseRowsEvent(buf *bytes.Buffer) (event *RowsEvent, err error) {
@@ -240,12 +362,16 @@ func (parser *eventParser) parseRowsEvent(buf *bytes.Buffer) (event *RowsEvent, 
 		event.columnsPresentBitmap2 = Bitfield(buf.Next(int((columnCount + 7) / 8)))
 	}
 
-	if buf.Len() < int((columnCount + 7) / 8) {
-		err = io.EOF
-	}
-	event.nullBitmap = Bitfield(buf.Next(int((columnCount + 7) / 8)))
+	event.tableMap = parser.tableMap[event.tableId]
+	for buf.Len() > 0 {
+		var row []driver.Value
+		row, err = parseEventRow(buf, event.tableMap)
+		if err != nil {
+			return
+		}
 
-	event.row_data = buf.Bytes()
+		event.rows = append(event.rows, &row)
+	}
 
 	return
 }
@@ -256,9 +382,23 @@ func (event *RowsEvent) Header() (*EventHeader) {
 
 func (event *RowsEvent) Print() {
 	event.header.Print()
-	fmt.Printf("tableId: %v, flags: %v, columnsPresentBitmap1: %x, columnsPresentBitmap2: %x, nullBitmap: %x\n",
-	           event.tableId, event.flags, event.columnsPresentBitmap1, event.columnsPresentBitmap2, event.nullBitmap)
-	fmt.Printf("Remaining Row Data:\n%s\n", hex.Dump(event.row_data))
+	fmt.Printf("tableId: %v, flags: %v, columnsPresentBitmap1: %x, columnsPresentBitmap2: %x\n",
+	           event.tableId, event.flags, event.columnsPresentBitmap1, event.columnsPresentBitmap2)
+
+	tableMap := event.tableMap
+	for i, row := range event.rows {
+		fmt.Printf("row[%d]:\n", i)
+		for j, col := range *row {
+			colType := tableMap.columnTypes[j]
+			typeName := fieldTypeName(colType)
+			switch colType {
+			case FIELD_TYPE_VARCHAR, FIELD_TYPE_BLOB:
+				fmt.Printf("  %s: %#v\n", typeName, col)
+			default:
+				fmt.Printf("  %s: %v\n", typeName, col)
+			}
+		}
+	}
 }
 
 
@@ -269,8 +409,55 @@ type TableMapEvent struct {
 	schemaName string
 	tableName string
 	columnTypes []FieldType
-	columnMeta []byte
+	columnMeta []uint16
 	nullBitmap Bitfield
+}
+
+func (event *TableMapEvent) parseColumnMetadata(data []byte) (error) {
+	pos := 0
+	event.columnMeta = make([]uint16, len(event.columnTypes))
+	for i, t := range event.columnTypes {
+		switch t {
+		case FIELD_TYPE_STRING,
+		     FIELD_TYPE_VAR_STRING,
+		     FIELD_TYPE_VARCHAR,
+		     FIELD_TYPE_DECIMAL,
+		     FIELD_TYPE_NEWDECIMAL,
+		     FIELD_TYPE_ENUM,
+		     FIELD_TYPE_SET:
+			event.columnMeta[i] = bytesToUint16(data[pos:pos+2])
+			pos += 2
+
+		case FIELD_TYPE_BLOB,
+		     FIELD_TYPE_DOUBLE,
+		     FIELD_TYPE_FLOAT,
+		     FIELD_TYPE_GEOMETRY:
+			event.columnMeta[i] = uint16(data[pos])
+			pos += 1
+
+		case FIELD_TYPE_BIT,
+		     FIELD_TYPE_DATE,
+		     FIELD_TYPE_DATETIME,
+		     FIELD_TYPE_TIMESTAMP,
+		     FIELD_TYPE_TIME,
+		     FIELD_TYPE_TINY,
+		     FIELD_TYPE_SHORT,
+		     FIELD_TYPE_INT24,
+		     FIELD_TYPE_LONG,
+		     FIELD_TYPE_LONGLONG,
+		     FIELD_TYPE_NULL,
+		     FIELD_TYPE_YEAR,
+		     FIELD_TYPE_NEWDATE,
+		     FIELD_TYPE_TINY_BLOB,
+		     FIELD_TYPE_MEDIUM_BLOB,
+		     FIELD_TYPE_LONG_BLOB:
+			event.columnMeta[i] = 0
+
+		default:
+			return fmt.Errorf("Unknown FieldType %d", t)
+		}
+	}
+	return nil
 }
 
 func (parser *eventParser) parseTableMapEvent(buf *bytes.Buffer) (event *TableMapEvent, err error) {
@@ -308,7 +495,9 @@ func (parser *eventParser) parseTableMapEvent(buf *bytes.Buffer) (event *TableMa
 	}
 
 	variableLength, _, err = readLengthEncodedInt(buf)
-	event.columnMeta = buf.Next(int(variableLength))
+	if err = event.parseColumnMetadata(buf.Next(int(variableLength))); err != nil {
+		return
+	}
 
 	if buf.Len() < int((columnCount + 7) / 8) {
 		err = io.EOF
@@ -328,39 +517,43 @@ func (event *TableMapEvent) Print() {
 	           event.tableId, event.flags, event.schemaName, event.tableName, event.columnTypeNames(), event.columnMeta, event.nullBitmap)
 }
 
+func fieldTypeName(t FieldType) string {
+	switch t {
+	case FIELD_TYPE_DECIMAL: return "FIELD_TYPE_DECIMAL"
+	case FIELD_TYPE_TINY: return "FIELD_TYPE_TINY"
+	case FIELD_TYPE_SHORT: return "FIELD_TYPE_SHORT"
+	case FIELD_TYPE_LONG: return "FIELD_TYPE_LONG"
+	case FIELD_TYPE_FLOAT: return "FIELD_TYPE_FLOAT"
+	case FIELD_TYPE_DOUBLE: return "FIELD_TYPE_DOUBLE"
+	case FIELD_TYPE_NULL: return "FIELD_TYPE_NULL"
+	case FIELD_TYPE_TIMESTAMP: return "FIELD_TYPE_TIMESTAMP"
+	case FIELD_TYPE_LONGLONG: return "FIELD_TYPE_LONGLONG"
+	case FIELD_TYPE_INT24: return "FIELD_TYPE_INT24"
+	case FIELD_TYPE_DATE: return "FIELD_TYPE_DATE"
+	case FIELD_TYPE_TIME: return "FIELD_TYPE_TIME"
+	case FIELD_TYPE_DATETIME: return "FIELD_TYPE_DATETIME"
+	case FIELD_TYPE_YEAR: return "FIELD_TYPE_YEAR"
+	case FIELD_TYPE_NEWDATE: return "FIELD_TYPE_NEWDATE"
+	case FIELD_TYPE_VARCHAR: return "FIELD_TYPE_VARCHAR"
+	case FIELD_TYPE_BIT: return "FIELD_TYPE_BIT"
+	case FIELD_TYPE_NEWDECIMAL: return "FIELD_TYPE_NEWDECIMAL"
+	case FIELD_TYPE_ENUM: return "FIELD_TYPE_ENUM"
+	case FIELD_TYPE_SET: return "FIELD_TYPE_SET"
+	case FIELD_TYPE_TINY_BLOB: return "FIELD_TYPE_TINY_BLOB"
+	case FIELD_TYPE_MEDIUM_BLOB: return "FIELD_TYPE_MEDIUM_BLOB"
+	case FIELD_TYPE_LONG_BLOB: return "FIELD_TYPE_LONG_BLOB"
+	case FIELD_TYPE_BLOB: return "FIELD_TYPE_BLOB"
+	case FIELD_TYPE_VAR_STRING: return "FIELD_TYPE_VAR_STRING"
+	case FIELD_TYPE_STRING: return "FIELD_TYPE_STRING"
+	case FIELD_TYPE_GEOMETRY: return "FIELD_TYPE_GEOMETRY"
+	}
+	return fmt.Sprintf("%d", t)
+}
+
 func (event *TableMapEvent) columnTypeNames() (names []string) {
 	names = make([]string, len(event.columnTypes))
 	for i, t := range event.columnTypes {
-		switch t {
-		case FIELD_TYPE_DECIMAL: names[i] = "FIELD_TYPE_DECIMAL"
-		case FIELD_TYPE_TINY: names[i] = "FIELD_TYPE_TINY"
-		case FIELD_TYPE_SHORT: names[i] = "FIELD_TYPE_SHORT"
-		case FIELD_TYPE_LONG: names[i] = "FIELD_TYPE_LONG"
-		case FIELD_TYPE_FLOAT: names[i] = "FIELD_TYPE_FLOAT"
-		case FIELD_TYPE_DOUBLE: names[i] = "FIELD_TYPE_DOUBLE"
-		case FIELD_TYPE_NULL: names[i] = "FIELD_TYPE_NULL"
-		case FIELD_TYPE_TIMESTAMP: names[i] = "FIELD_TYPE_TIMESTAMP"
-		case FIELD_TYPE_LONGLONG: names[i] = "FIELD_TYPE_LONGLONG"
-		case FIELD_TYPE_INT24: names[i] = "FIELD_TYPE_INT24"
-		case FIELD_TYPE_DATE: names[i] = "FIELD_TYPE_DATE"
-		case FIELD_TYPE_TIME: names[i] = "FIELD_TYPE_TIME"
-		case FIELD_TYPE_DATETIME: names[i] = "FIELD_TYPE_DATETIME"
-		case FIELD_TYPE_YEAR: names[i] = "FIELD_TYPE_YEAR"
-		case FIELD_TYPE_NEWDATE: names[i] = "FIELD_TYPE_NEWDATE"
-		case FIELD_TYPE_VARCHAR: names[i] = "FIELD_TYPE_VARCHAR"
-		case FIELD_TYPE_BIT: names[i] = "FIELD_TYPE_BIT"
-		case FIELD_TYPE_NEWDECIMAL: names[i] = "FIELD_TYPE_NEWDECIMAL"
-		case FIELD_TYPE_ENUM: names[i] = "FIELD_TYPE_ENUM"
-		case FIELD_TYPE_SET: names[i] = "FIELD_TYPE_SET"
-		case FIELD_TYPE_TINY_BLOB: names[i] = "FIELD_TYPE_TINY_BLOB"
-		case FIELD_TYPE_MEDIUM_BLOB: names[i] = "FIELD_TYPE_MEDIUM_BLOB"
-		case FIELD_TYPE_LONG_BLOB: names[i] = "FIELD_TYPE_LONG_BLOB"
-		case FIELD_TYPE_BLOB: names[i] = "FIELD_TYPE_BLOB"
-		case FIELD_TYPE_VAR_STRING: names[i] = "FIELD_TYPE_VAR_STRING"
-		case FIELD_TYPE_STRING: names[i] = "FIELD_TYPE_STRING"
-		case FIELD_TYPE_GEOMETRY: names[i] = "FIELD_TYPE_GEOMETRY"
-		default: names[i] = fmt.Sprintf("%d", t)
-		}
+		names[i] = fieldTypeName(t)
 	}
 	return
 }
@@ -384,7 +577,11 @@ func (parser *eventParser) parseEvent(data []byte) (event BinlogEvent, err error
 	case ROTATE_EVENT:
 		return parseRotateEvent(buf)
 	case TABLE_MAP_EVENT:
-		return parser.parseTableMapEvent(buf)
+		var table_map_event *TableMapEvent
+		table_map_event, err = parser.parseTableMapEvent(buf)
+		parser.tableMap[table_map_event.tableId] = table_map_event
+		event = table_map_event
+		return
 	case WRITE_ROWS_EVENTv1, UPDATE_ROWS_EVENTv1, DELETE_ROWS_EVENTv1:
 		return parser.parseRowsEvent(buf)
 	default:
@@ -521,10 +718,17 @@ func (header *EventHeader) Print() {
 
 type eventParser struct {
 	format *FormatDescriptionEvent
+	tableMap map[uint64]*TableMapEvent
+}
+
+func newEventParser() (parser *eventParser) {
+	parser = new(eventParser)
+	parser.tableMap = make(map[uint64]*TableMapEvent)
+	return
 }
 
 func (mc *mysqlConn) DumpBinlog(filename string, position uint32) (driver.Rows, error) {
-	parser := new(eventParser)
+	parser := newEventParser()
 	ServerId := uint32(1) // Must be non-zero to avoid getting EOF packet
 	flags := uint16(0)
 
